@@ -1,0 +1,381 @@
+#include <Arduino.h>
+#include <EEPROM.h>
+
+// Variáveis Globais
+String recebido = "";
+String sequenciaNumerica = "";
+const int LED_PINS[] = {11, 10, 9, 8};  // LEDs: Amarelo = 1, Azul = 2, Verde = 3, Vermelho = 4
+const int BUTTON_PINS[] = {5, 4, 3, 2}; // Botões: Amarelo = 1, Azul = 2, Verde = 3, Vermelho = 4
+const int BUZZER_PIN = 6;                // Pino do buzzer
+const long SERIAL_TIMEOUT = 10000;       // Timeout de 10 segundos para seleção de dificuldade via Serial
+const int NUM_LEDS = sizeof(LED_PINS) / sizeof(LED_PINS[0]);
+int faseAtual = 1;                       // Inicia na Fase 1
+int velocidadePiscagem = 1000;           // Velocidade de piscagem dos LEDs (inicial: 1000ms)
+
+// Endereços de memória para salvar os recordes na EEPROM
+const int EEPROM_ADDR_FACIL = 0;
+const int EEPROM_ADDR_MEDIO = sizeof(int);
+const int EEPROM_ADDR_DIFICIL = sizeof(int) * 2;
+
+int recordeFacil = 0;
+int recordeMedio = 0;
+int recordeDificil = 0;
+
+enum Dificuldade {
+  FACIL = 1000,  // Fácil (piscagem lenta)
+  MEDIO = 500,   // Médio (piscagem intermediária)
+  DIFICIL = 250   // Difícil (piscagem rápida)
+};
+
+// Definindo o enum para os estados do jogo
+enum GameState {
+  SELECT_DIFFICULTY,
+  START_GAME,
+  PLAY_LEVEL,
+  GAME_OVER
+};
+GameState stateGame = SELECT_DIFFICULTY;
+
+void setup() {
+  Serial.begin(9600);
+
+  // Carregar recordes da EEPROM
+  EEPROM.get(EEPROM_ADDR_FACIL, recordeFacil);
+  EEPROM.get(EEPROM_ADDR_MEDIO, recordeMedio);
+  EEPROM.get(EEPROM_ADDR_DIFICIL, recordeDificil);
+
+  // Se os valores forem inválidos ou não foram inicializados, inicializa com 0
+  if (recordeFacil == 255 || recordeFacil < 0) recordeFacil = 0;
+  if (recordeMedio == 255 || recordeMedio < 0) recordeMedio = 0;
+  if (recordeDificil == 255 || recordeDificil < 0) recordeDificil = 0;
+
+  // Definir LEDs como OUTPUTs
+  for (int i = 0; i < NUM_LEDS; i++) {
+    pinMode(LED_PINS[i], OUTPUT);
+  }
+
+  // Configura os botões como INPUT_PULLUP
+  for (int i = 0; i < sizeof(BUTTON_PINS) / sizeof(BUTTON_PINS[0]); i++) {
+    pinMode(BUTTON_PINS[i], INPUT_PULLUP);
+  }
+
+  // Configura o pino do buzzer como OUTPUT
+  pinMode(BUZZER_PIN, OUTPUT);
+  
+  randomSeed(analogRead(A0)); // Inicializa a semente do gerador de números aleatórios
+}
+
+void loop() {
+  switch (stateGame) {
+    case SELECT_DIFFICULTY:
+      selecionarDificuldade();
+      break;
+
+    case START_GAME:
+      iniciarJogo();
+      break;
+
+    case PLAY_LEVEL:
+      jogarFase();
+      break;
+
+    case GAME_OVER:
+      finalizarJogo();
+      break;
+  }
+}
+
+void selecionarDificuldade() {
+  Serial.println("* SELECIONE A DIFICULDADE *");
+  Serial.println("1: Fácil (Pisca devagar)");
+  Serial.println("2: Médio (Velocidade intermediária)");
+  Serial.println("3: Difícil (Pisca rápido)");
+
+  recebido = ""; // Limpa a variável recebido
+
+  // Limpar o buffer serial antes de começar a esperar
+  while (Serial.available() > 0) {
+    Serial.read(); // Descarta quaisquer dados residuais
+  }
+
+  unsigned long startTime = millis();
+
+  bool selecionado = false;
+
+  while (!selecionado && millis() - startTime < SERIAL_TIMEOUT) {
+    // Verificação via Serial
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (isDigit(c)) {
+        int escolha = c - '0';
+        if (escolha >= 1 && escolha <= 3) {
+          recebido = String(escolha);
+          selecionado = true;
+        }
+      }
+    }
+
+    // Verificação via Botões
+    for (int j = 0; j < NUM_LEDS; j++) {
+      if (digitalRead(BUTTON_PINS[j]) == LOW) { // Detecta botão pressionado
+        while (digitalRead(BUTTON_PINS[j]) == LOW) {
+          delay(10); // Aguarda o botão ser solto
+        }
+        recebido = String(j + 1);
+        selecionado = true;
+      }
+    }
+
+    delay(10); // Pequena pausa para evitar loop muito rápido
+  }
+
+  if (selecionado) {
+    // Definir a velocidade de piscagem com base na escolha
+    if (recebido.equals("1")) {
+      velocidadePiscagem = FACIL;
+    } else if (recebido.equals("2")) {
+      velocidadePiscagem = MEDIO;
+    } else if (recebido.equals("3")) {
+      velocidadePiscagem = DIFICIL;
+    }
+    stateGame = START_GAME;
+  } else {
+    // Timeout ocorreu sem seleção
+    Serial.println("Timeout! Reiniciando seleção de dificuldade.");
+    delay(1000); // Pausa antes de reiniciar a seleção
+  }
+}
+
+void iniciarJogo() {
+  Serial.println("* INÍCIO *");
+  Serial.print("Jogo começando na dificuldade ");
+  
+  String dificuldadeNome = "";
+  switch (velocidadePiscagem) {
+    case FACIL:
+      dificuldadeNome = "facil";
+      break;
+    case MEDIO:
+      dificuldadeNome = "medio";
+      break;
+    case DIFICIL:
+      dificuldadeNome = "dificil";
+      break;
+    default:
+      dificuldadeNome = "desconhecida";
+      break;
+  }
+  
+  Serial.println(dificuldadeNome);
+  
+  exibirRecorde(); // Exibe o recorde após as mensagens iniciais
+  
+  // Iniciar o som
+  int duration = 500; // Duração do som
+  unsigned long startTime = millis();
+
+  // Tocar o som enquanto acende e apaga os LEDs
+  tone(BUZZER_PIN, 1000); // Frequência 1000 Hz
+
+  // Piscar LEDs enquanto o som toca
+  while (millis() - startTime < duration) {
+    piscaled(velocidadePiscagem, 1); // Pisca os LEDs na velocidade escolhida
+  }
+
+  noTone(BUZZER_PIN); // Para o som após a duração
+
+  delay(1500); // Aguarda 1.5 segundos
+
+  faseAtual = 1;
+  stateGame = PLAY_LEVEL;
+}
+
+
+
+void tocarMelodiaS(int duracaoTotal) {
+  int notas[] = {262, 294, 330, 349, 392, 440, 494, 523}; // Notas (C4 a C5)
+  int numNotas = sizeof(notas) / sizeof(notas[0]); // Número de notas
+  int duracaoNota = duracaoTotal / numNotas; // Duração de cada nota
+  
+  for (int i = 0; i < numNotas; i++) {
+    tone(BUZZER_PIN, notas[i], duracaoNota); // Toca a nota
+    delay(duracaoNota); // Aguarda a duração da nota
+    noTone(BUZZER_PIN); // Para a nota após a duração
+    delay(10); // Pausa entre as notas
+  }
+}
+
+void tocarMelodiaD() {
+  int notas[] = {500, 600, 700, 800, 700, 600, 500}; // Frequências das notas
+  int duracoes[] = {200, 200, 200, 200, 200, 200, 200}; // Durações das notas
+
+  for (int i = 0; i < sizeof(notas) / sizeof(notas[0]); i++) {
+    tone(BUZZER_PIN, notas[i], duracoes[i]); // Toca a nota
+    delay(duracoes[i]); // Aguarda a duração da nota
+  }
+  
+  noTone(BUZZER_PIN); // Para o som após a melodia
+}
+
+
+void jogarFase() {
+  Serial.print("* Fase ");
+  Serial.print(faseAtual);
+  Serial.println(" *");
+  geraSequencia(velocidadePiscagem, faseAtual + 2); // Inicia com 3 LEDs e aumenta conforme o nível
+  verificaSequencia(faseAtual + 2);                 // Verifica a sequência
+}
+
+void finalizarJogo() {
+  Serial.println("Game Over");
+  
+  // Iniciar a melodia de derrota
+  int duration = 1500; // Duração da melodia
+  unsigned long startTime = millis();
+  
+  tocarMelodiaD(); // Toca a melodia de derrota
+
+  // Piscar LEDs enquanto a melodia toca
+  while (millis() - startTime < duration) {
+    piscaled(500, 1); // Pisca os LEDs na velocidade escolhida
+  }
+
+  atualizarRecorde(); // Atualiza o recorde se necessário
+  
+  // Exibe todos os recordes
+  exibirRecorde(); // Adicione esta linha para mostrar os recordes ao final
+
+  stateGame = SELECT_DIFFICULTY; // Reinicia o jogo automaticamente
+}
+
+
+
+void piscaled(int tempo, int vezes) {
+  for (int i = 0; i < vezes; i++) {
+    for (int j = 0; j < NUM_LEDS; j++) {
+      digitalWrite(LED_PINS[j], HIGH);
+    }
+    delay(tempo);
+    for (int j = 0; j < NUM_LEDS; j++) {
+      digitalWrite(LED_PINS[j], LOW);
+    }
+    delay(tempo);
+  }
+}
+
+void geraSequencia(int tempo, int sequencia) {
+  int ordemLeds[sequencia];
+
+  for (int i = 0; i < sequencia; i++) {
+    ordemLeds[i] = random(1, NUM_LEDS + 1);
+  }
+
+  sequenciaNumerica = "";
+  for (int j = 0; j < sequencia; j++) {
+    int ledIndex = ordemLeds[j] - 1;
+    sequenciaNumerica += String(ordemLeds[j]);
+
+    // Toca um som correspondente ao LED
+    int frequencia = 1000 - (ledIndex * 200);
+    tone(BUZZER_PIN, frequencia, tempo); // Inicia o som
+
+    digitalWrite(LED_PINS[ledIndex], HIGH); // Acende o LED
+    delay(tempo);
+    digitalWrite(LED_PINS[ledIndex], LOW); // Apaga o LED
+    delay(tempo);
+
+    noTone(BUZZER_PIN); // Para o som após o tempo de piscar
+  }
+
+  Serial.print("Sequência gerada: ");
+  Serial.println(sequenciaNumerica);
+}
+
+
+void verificaSequencia(int length) {
+  String resposta = "";
+  unsigned long startTime = millis();
+  const unsigned long INPUT_TIMEOUT = 20000; // Timeout total de 20 segundos para entrada
+  const unsigned long DEBOUNCE_TIME = 150;   // Tempo de debounce para botões
+
+  Serial.println("Insira a sequência via Botões ou Serial:");
+  Serial.println("Digite os números correspondentes ou pressione os botões!");
+
+  while (resposta.length() < length && millis() - startTime < INPUT_TIMEOUT) {
+    // Verifica entrada pela Serial
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (isDigit(c)) {
+        resposta += c;
+        Serial.print("Você digitou: ");
+        Serial.println(c);
+        delay(DEBOUNCE_TIME); // Delay para evitar múltiplas entradas
+      }
+    }
+
+    // Verifica botões
+    for (int j = 0; j < NUM_LEDS; j++) {
+      if (digitalRead(BUTTON_PINS[j]) == LOW) {
+        resposta += String(j + 1);
+        Serial.print("Você pressionou o botão: ");
+        Serial.println(j + 1);
+        delay(DEBOUNCE_TIME); // Delay para evitar múltiplas entradas
+
+        // Toca um som correspondente ao botão pressionado
+        tocarNota(1000 - (j * 200), 300); // Frequências diferentes para cada botão, duração 
+        digitalWrite(LED_PINS[j], HIGH);  // Acende o LED correspondente
+        delay(300);                        // Mantém o LED aceso 
+        digitalWrite(LED_PINS[j], LOW);   // Desliga o LED
+      }
+    }
+  }
+
+  // Verifica se a resposta está correta
+  if (resposta == sequenciaNumerica) {
+    Serial.println("Correto!");
+    faseAtual++;
+    // Toca um som ao passar para a próxima fase
+    //tocarNota(2000, 500); // Frequência 2000 Hz por 500 ms
+
+    tocarMelodiaS(1500); // Toca a melodia por 1.5 segundos
+    
+    delay(1500); // Atraso de 1,5 segundos ao passar de fase
+    stateGame = PLAY_LEVEL; // Passa para a próxima fase
+  } else {
+    Serial.println("Incorreto! Você perdeu.");
+    stateGame = GAME_OVER; // Chama o estado de Game Over
+  }
+}
+
+void tocarNota(int frequencia, int duracao) {
+  tone(BUZZER_PIN, frequencia, duracao);
+  delay(duracao);
+  noTone(BUZZER_PIN); // Para o som após a duração
+}
+
+void exibirRecorde() {
+  Serial.print("Recorde Fácil: ");
+  Serial.println(recordeFacil);
+  Serial.print("Recorde Médio: ");
+  Serial.println(recordeMedio);
+  Serial.print("Recorde Difícil: ");
+  Serial.println(recordeDificil);
+}
+
+void atualizarRecorde() {
+  if (faseAtual - 1 > recordeFacil && velocidadePiscagem == FACIL) {
+    recordeFacil = faseAtual - 1;
+    EEPROM.put(EEPROM_ADDR_FACIL, recordeFacil);
+    Serial.println("Novo recorde na dificuldade fácil!");
+  }
+  if (faseAtual - 1 > recordeMedio && velocidadePiscagem == MEDIO) {
+    recordeMedio = faseAtual - 1;
+    EEPROM.put(EEPROM_ADDR_MEDIO, recordeMedio);
+    Serial.println("Novo recorde na dificuldade média!");
+  }
+  if (faseAtual - 1 > recordeDificil && velocidadePiscagem == DIFICIL) {
+    recordeDificil = faseAtual - 1;
+    EEPROM.put(EEPROM_ADDR_DIFICIL, recordeDificil);
+    Serial.println("Novo recorde na dificuldade difícil!");
+  }
+}
